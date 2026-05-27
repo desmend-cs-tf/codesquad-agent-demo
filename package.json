@@ -1,0 +1,18 @@
+{
+  "name": "codesquad-agent-demo",
+  "version": "1.0.0",
+  "description": "Codesquad agent Demo",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@langchain/anthropic": "^1.4.0",
+    "@langchain/core": "^1.1.48",
+    "dotenv": "^17.4.2",
+    "langchain": "^1.4.2"
+  }
+}
