@@ -6,7 +6,7 @@ import { getLessonTopicsTool, postToSlackTool } from "./tools/slackTool.js";
 
 // ── ONLY THIS BLOCK CHANGES vs Claude ─────────────────────────
 const model = new ChatGoogleGenerativeAI({
-  model: "gemini-1.5-flash",
+  model: "gemini-1.5-pro", 
   maxOutputTokens: 512,
   temperature: 0,
 });
