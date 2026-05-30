@@ -33,7 +33,7 @@ export const postToSlackTool = new DynamicTool({
             return "Error: You do not have the correct SLACK Webhook URL"
         }
 
-        const response = await fetch(webhook, {
+        const response = await fetch(webhookUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text: message }),

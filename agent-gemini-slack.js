@@ -1,30 +1,33 @@
 import "dotenv/config";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
+// import { getLessonTopicsTool, postToSlackTool } from "./tools/slackTool.js";
 import { getLessonTopicsTool } from "./tools/slackTool.js";
+
 import { sendEmailDigestTool } from "./tools/emailTool.js";
 
 // ── ONLY THIS BLOCK CHANGES vs Claude ─────────────────────────
 const model = new ChatGoogleGenerativeAI({
-  model: "gemini-2.5-flash",
+  model: "gemini-2.5-flash", 
   maxOutputTokens: 512,
   temperature: 0,
 });
 
-// ── Slack tool commented out — email only for now ──────────────
+// ── Everything below is identical ─────────────────────────────
+// const tools = [getLessonTopicsTool, postToSlackTool, sendEmailDigestTool];
 const tools = [getLessonTopicsTool, sendEmailDigestTool];
+
 
 const agent = createReactAgent({
   llm: model,
   tools,
 });
 
-// ── Goal updated: email instead of Slack ──────────────────────
 const input =
   process.argv[2] ||
   "Get today's lesson topics, write a short friendly recap, " +
-  "add 'Curated by: Desmend Jetton', " +
-  "and email it to me as the digest.";
+  "add in curated by: Desmend Jetton, " +
+  "and post it to the class Slack channel.";
 
 console.log("Running agent with Gemini Flash...\n");
 console.log("Goal:", input);
