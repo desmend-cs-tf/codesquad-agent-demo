@@ -71,76 +71,87 @@ export const ragSearchTool = tool(
     await connectDB();
     console.log(`\n🔍 Searching: "${question}"`);
 
-    // ── STEP 2: Convert question to vector ─────────────────────
-    // "What is Desmend's dream job?"
-    // → [0.22, -0.79, 0.16, ..., 384 numbers]
-    // This vector represents the MEANING of the question
-    // We'll use it to find chunks with similar meanings in MongoDB
+    // ── STEP 2: Extract student name from question (if present) ─
+    // Look for patterns like "Desmend's", "Desmend", etc.
+    const knownFirstNames = [
+      "Desmend",
+      "Lewis", 
+      "Miguel",
+      "Jaiden",
+      "Andrew",
+    ];
+    
+    let extractedStudentName = null;
+    
+    // Try to find a student name mentioned in the question
+    for (const firstName of knownFirstNames) {
+      const regex = new RegExp(`\\b${firstName}\\b`, "i");
+      if (regex.test(question)) {
+        extractedStudentName = firstName;
+        console.log(`   Filtering results to: "${firstName}"`);
+        break;
+      }
+    }
+
+    // ── STEP 3: Convert question to vector ─────────────────────
     const queryVector = await getEmbedding(question);
 
-    // ── STEP 3: Run MongoDB $vectorSearch ──────────────────────
-    // Chunk.aggregate() runs an aggregation pipeline in MongoDB
-    // An aggregation pipeline is a series of stages that transform data
-    // We use two stages:
-    //   Stage 1: $vectorSearch — finds similar chunks by vector distance
-    //   Stage 2: $project — selects which fields to include in results
+    // ── STEP 4: Run MongoDB $vectorSearch (search ALL students) ─
+    // Get the top results from all students, then filter after
     const results = await Chunk.aggregate([
-
-      // ── STAGE 1: $vectorSearch ────────────────────────────────
-      // This is the MongoDB Atlas Vector Search aggregation stage
-      // It takes a query vector and finds the closest stored vectors
-      //
-      // How it works:
-      //   1. Takes queryVector (our question as numbers)
-      //   2. Compares it to EVERY embedding in the chunks collection
-      //   3. Uses COSINE SIMILARITY to measure how close they are
-      //      (cosine similarity 1.0 = identical, 0.0 = unrelated)
-      //   4. Returns the top `limit` closest chunks
       {
         $vectorSearch: {
-          index: "autoembed_index", // Name of the Vector Search index in Atlas
-                                    // Must match EXACTLY what you named it in Atlas UI
-          path: "embedding",        // The field in MongoDB that stores our vectors
-                                    // Matches the "embedding" field in Document.js
-          queryVector,              // Our question converted to 384 numbers
-                                    // MongoDB compares this to every stored embedding
-          // NO filter here — we search ALL students' chunks
-          // MongoDB returns whichever chunks are most similar
-          // regardless of which student they belong to
-          numCandidates: 100,       // Check 100 candidates before picking the best ones
-                                    // Higher = more accurate but slightly slower
-                                    // Rule: numCandidates should be at least 10x limit
-          limit,                    // Return only the top N results (default: 4)
-                                    // These are the most semantically similar chunks
+          index: "autoembed_index",
+          path: "embedding",
+          queryVector,
+          numCandidates: 100,
+          limit: limit * 3, // Get extra results so we have enough after filtering
         },
       },
 
-      // ── STAGE 2: $project ─────────────────────────────────────
-      // $project selects which fields to include in the results
-      // 1 = include this field
-      // 0 = exclude this field
       {
         $project: {
-          content:     1, // The actual Q&A text — what Claude will read
-          studentName: 1, // Who wrote this — so we see names not IDs
-          score: { $meta: "vectorSearchScore" }, // Similarity score (0–1)
-                                                  // Higher = more similar to query
-          _id: 0, // Exclude MongoDB's internal document ID (we don't need it)
+          content:     1,
+          studentName: 1,
+          score: { $meta: "vectorSearchScore" },
+          _id: 0,
         },
       },
     ]);
 
-    // Log how many results came back — useful for debugging
-    console.log(`   Found ${results.length} results`);
+    // Log how many results came back from MongoDB
+    console.log(`   Found ${results.length} total results from database`);
+    
+    // ── STEP 5: Filter results by student if one was identified ─
+    let filteredResults = results;
+    if (extractedStudentName) {
+      // Use case-insensitive matching for student name prefix
+      // E.g., "Desmend" matches "Desmend Jetton"
+      const regex = new RegExp(`^${extractedStudentName}`, "i");
+      filteredResults = results.filter(r => regex.test(r.studentName));
+      
+      console.log(`   Filtered to ${filteredResults.length} results for "${extractedStudentName}"`);
+      
+      // If no results for this student, fall back to showing top results from anyone
+      if (filteredResults.length === 0) {
+        console.log(`   (No results for "${extractedStudentName}", showing best matches)`);
+        filteredResults = results.slice(0, limit);
+      } else if (filteredResults.length > limit) {
+        filteredResults = filteredResults.slice(0, limit);
+      }
+    } else {
+      // No student specified, just take the top N results
+      filteredResults = results.slice(0, limit);
+    }
 
-    // ── STEP 4: Handle no results ──────────────────────────────
+    // ── STEP 6: Handle no results ──────────────────────────────
     // If the database returned nothing, tell Claude
     // Claude will then tell the user the topic wasn't found
-    if (results.length === 0) {
+    if (filteredResults.length === 0) {
       return "No matching content found.";
     }
 
-    // ── STEP 5: Format results for Claude ──────────────────────
+    // ── STEP 7: Format results for Claude ──────────────────────
     // Transform the array of result objects into a readable string
     // Claude reads this string and uses it to compose its answer
     //
@@ -154,7 +165,7 @@ export const ragSearchTool = tool(
     // The studentName in brackets tells Claude WHOSE answer this is
     // The score tells Claude HOW CONFIDENT the match is
     // The content is what Claude uses to formulate the answer
-    return results
+    return filteredResults
       .map(
         (r) =>
           `[${r.studentName}] [score: ${r.score.toFixed(3)}]\n${r.content}`
