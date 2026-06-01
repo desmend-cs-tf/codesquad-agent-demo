@@ -1,125 +1,191 @@
 // tools/ragSearchTool.js
-// The RAG Search Tool — finds relevant student Q&As in MongoDB
-// This is the RETRIEVAL part of RAG (Retrieval Augmented Generation)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// THE RAG SEARCH TOOL
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Purpose: Search all student Q&As in MongoDB by MEANING
+// When:    Called by the agent EVERY TIME a question is asked
+// What it does:
+//   1. Converts the question to a vector (same model as ingestTool)
+//   2. Runs MongoDB $vectorSearch to find the closest matching chunks
+//   3. Returns the matching chunks to Claude so it can answer
+//
+// This is the RETRIEVAL part of RAG:
+//   R = Retrieval  ← this tool
+//   A = Augmented  ← we add retrieved chunks to the prompt
+//   G = Generation ← Claude generates the answer from those chunks
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-import { tool } from "@langchain/core/tools";
-import { z } from "zod";
+// dotenv MUST be first
+import "dotenv/config";
+
+import { tool }             from "@langchain/core/tools";
+import { z }                from "zod";
 import { Chunk, connectDB } from "../models/Document.js";
-import { pipeline } from "@xenova/transformers";
+import { pipeline }         from "@xenova/transformers";
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// STEP 1: Load the embedding model
+// LOAD THE SAME EMBEDDING MODEL AS ingestTool
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Xenova is a free, local embedding model (runs on your machine)
-// It converts text → 384 numbers that represent meaning
-// We use it BOTH to:
-//   1. Create embeddings when saving chunks (ingestTool)
-//   2. Create embeddings when searching (this tool)
-// Same model = same vector space = search works
+// WHY THE SAME MODEL?
+//   At ingest time:  "CTO of a dope startup" → [0.23, -0.81, 0.14, ...]
+//   At search time:  "dream job"             → [0.22, -0.79, 0.16, ...]
+//   These vectors are CLOSE in the 384-dimensional space
+//   MongoDB $vectorSearch finds that closeness
+//
+//   If we used a DIFFERENT model for search:
+//   "dream job" might produce completely different numbers
+//   and the search would return garbage results
+//
+// Xenova caches the model after first download
+// so both tools share the same cached copy
 const embed = await pipeline(
   "feature-extraction",
   "Xenova/all-MiniLM-L6-v2"
 );
 
-// Helper function: convert text to a vector (384 numbers)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// HELPER: getEmbedding(text)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Identical to the one in ingestTool — converts text to 384 numbers
+// We need this here to convert the SEARCH QUESTION to a vector
+// before running $vectorSearch
 async function getEmbedding(text) {
   const output = await embed(text, { pooling: "mean", normalize: true });
-  return Array.from(output.data); // Convert to plain array of numbers
+  return Array.from(output.data);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// STEP 2: Define the search tool
+// THE SEARCH TOOL DEFINITION
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// This is what Claude can call when it wants to search
 export const ragSearchTool = tool(
-  // The actual function that runs when Claude calls this tool
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // THE FUNCTION THAT RUNS
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Claude calls this with:
+  //   question: "What is Desmend's dream job?"
+  //   limit:    4 (optional — how many chunks to return)
   async ({ question, limit = 4 }) => {
-    // Connect to MongoDB (if not already connected)
+
+    // ── STEP 1: Connect to MongoDB ──────────────────────────────
     await connectDB();
     console.log(`\n🔍 Searching: "${question}"`);
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // CONVERT QUESTION TO VECTOR
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // "What is Lewis' ideal salary?" becomes [0.23, -0.81, 0.14, ...]
-    // This vector goes into the same 384-dimensional space as the chunks
+    // ── STEP 2: Convert question to vector ─────────────────────
+    // "What is Desmend's dream job?"
+    // → [0.22, -0.79, 0.16, ..., 384 numbers]
+    // This vector represents the MEANING of the question
+    // We'll use it to find chunks with similar meanings in MongoDB
     const queryVector = await getEmbedding(question);
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // SEARCH MONGODB WITH VECTOR SEARCH
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // MongoDB's $vectorSearch aggregation stage:
-    //   1. Takes your queryVector
-    //   2. Finds all stored chunks with similar embeddings
-    //   3. Returns them sorted by similarity (highest first)
-    // This is the core of RAG — it finds RELEVANT chunks, not all chunks
+    // ── STEP 3: Run MongoDB $vectorSearch ──────────────────────
+    // Chunk.aggregate() runs an aggregation pipeline in MongoDB
+    // An aggregation pipeline is a series of stages that transform data
+    // We use two stages:
+    //   Stage 1: $vectorSearch — finds similar chunks by vector distance
+    //   Stage 2: $project — selects which fields to include in results
     const results = await Chunk.aggregate([
+
+      // ── STAGE 1: $vectorSearch ────────────────────────────────
+      // This is the MongoDB Atlas Vector Search aggregation stage
+      // It takes a query vector and finds the closest stored vectors
+      //
+      // How it works:
+      //   1. Takes queryVector (our question as numbers)
+      //   2. Compares it to EVERY embedding in the chunks collection
+      //   3. Uses COSINE SIMILARITY to measure how close they are
+      //      (cosine similarity 1.0 = identical, 0.0 = unrelated)
+      //   4. Returns the top `limit` closest chunks
       {
         $vectorSearch: {
           index: "autoembed_index", // Name of the Vector Search index in Atlas
-          path: "embedding", // Field in MongoDB that stores the vectors
-          queryVector, // Your question converted to numbers
-          // NO filter — search all students' chunks
-          numCandidates: 100, // Check 100 chunks before returning best ones
-          limit, // Return top 4 chunks (or whatever limit is set)
+                                    // Must match EXACTLY what you named it in Atlas UI
+          path: "embedding",        // The field in MongoDB that stores our vectors
+                                    // Matches the "embedding" field in Document.js
+          queryVector,              // Our question converted to 384 numbers
+                                    // MongoDB compares this to every stored embedding
+          // NO filter here — we search ALL students' chunks
+          // MongoDB returns whichever chunks are most similar
+          // regardless of which student they belong to
+          numCandidates: 100,       // Check 100 candidates before picking the best ones
+                                    // Higher = more accurate but slightly slower
+                                    // Rule: numCandidates should be at least 10x limit
+          limit,                    // Return only the top N results (default: 4)
+                                    // These are the most semantically similar chunks
         },
       },
+
+      // ── STAGE 2: $project ─────────────────────────────────────
+      // $project selects which fields to include in the results
+      // 1 = include this field
+      // 0 = exclude this field
       {
-        // $project: which fields to include in the results
         $project: {
-          content: 1, // Include the actual text chunk
-          studentName: 1, // Include the student's name so we know whose answer it is
-          score: { $meta: "vectorSearchScore" }, // Include similarity score (0-1)
-          _id: 0, // Exclude MongoDB's internal ID field
+          content:     1, // The actual Q&A text — what Claude will read
+          studentName: 1, // Who wrote this — so we see names not IDs
+          score: { $meta: "vectorSearchScore" }, // Similarity score (0–1)
+                                                  // Higher = more similar to query
+          _id: 0, // Exclude MongoDB's internal document ID (we don't need it)
         },
       },
     ]);
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // HANDLE NO RESULTS
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // If no chunks match the question, tell Claude that
+    // Log how many results came back — useful for debugging
+    console.log(`   Found ${results.length} results`);
+
+    // ── STEP 4: Handle no results ──────────────────────────────
+    // If the database returned nothing, tell Claude
+    // Claude will then tell the user the topic wasn't found
     if (results.length === 0) {
-      return `No matching content found.`;
+      return "No matching content found.";
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // FORMAT RESULTS FOR CLAUDE
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // Take each result and format it nicely so Claude can read it
-    // Include:
-    //   - Student name: so Claude knows whose answer this is
-    //   - Score: so Claude sees how confident the match is
-    //   - Content: the actual Q&A
-    const chunks = results
+    // ── STEP 5: Format results for Claude ──────────────────────
+    // Transform the array of result objects into a readable string
+    // Claude reads this string and uses it to compose its answer
+    //
+    // Each result looks like:
+    //   [Desmend Jetton] [score: 0.921]
+    //   Q: What job would you like after CodeSquad? A: CTO of a dope startup
+    //   ---
+    //   [Desmend Jetton] [score: 0.874]
+    //   Q: Where do you see yourself in 3-5 years? A: Happy and blessed...
+    //
+    // The studentName in brackets tells Claude WHOSE answer this is
+    // The score tells Claude HOW CONFIDENT the match is
+    // The content is what Claude uses to formulate the answer
+    return results
       .map(
         (r) =>
-          `[${r.studentName}]: [score: ${r.score.toFixed(3)}]\n${r.content}`
+          `[${r.studentName}] [score: ${r.score.toFixed(3)}]\n${r.content}`
       )
-      .join("\n---\n"); // Separate chunks with --- for readability
-
-    return chunks;
+      .join("\n---\n"); // Separate each result with --- for readability
   },
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // TOOL DEFINITION (metadata)
+  // TOOL METADATA
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // This tells Claude:
-  //   - What this tool is called
-  //   - When to use it
-  //   - What parameters it accepts
   {
+    // The name Claude uses internally to call this tool
     name: "search_student_sheet",
+
+    // Claude reads this to decide WHEN to use this tool
+    // "ALWAYS call this FIRST" is critical — without it Claude might
+    // try to answer from its training data instead of our database
     description:
-      "Searches ALL students' Q&A sheets by meaning using vector similarity. " +
-      "Returns results from whichever student's sheet matches best. " +
-      "ALWAYS call this FIRST before answering any question.",
+      "Searches ALL student Q&A responses in the database by meaning. " +
+      "Call this FIRST for every single question. Always. No exceptions. " +
+      "Returns the most relevant chunks from whichever student matches best.",
+
+    // What Claude must pass when calling this tool
     schema: z.object({
       question: z.string().describe(
-        "The question or topic to search for. Example: 'What is Lewis ideal salary?' or 'Where does Desmend see himself in 5 years?'"
+        "The full question to search for. " +
+        "Example: 'What is Desmend's dream job?' or 'What is Lewis' salary goal?'"
       ),
       limit: z.number().optional().describe(
-        "Max number of chunks to return. Default 4. Use more for broad topics."
+        "Max number of chunks to return. Default is 4. " +
+        "Use 6-8 for broad questions about multiple students."
       ),
     }),
   }
