@@ -1,55 +1,33 @@
 import { tool } from "@langchain/core/tools";
-import { z }    from "zod";
+import { z } from "zod";
 
 export const fetchTechNewsTool = tool(
-  async ({ query, limit }) => {
+  async ({ pageSize = 10 }) => {
     try {
-      const params = new URLSearchParams({
-        q:              query || "",
-        section:        "technology",
-        "page-size":    String(limit),
-        "show-fields":  "trailText",
-        "order-by":     "newest",
-        "api-key":      process.env.GUARDIAN_API_KEY,
-      });
+      const apiKey = process.env.GUARDIAN_API_KEY;
+      const url = `https://content.guardianapis.com/search?section=technology&page-size=${pageSize}&show-fields=trailText&api-key=${apiKey}`;
 
-      const res  = await fetch(`https://content.guardianapis.com/search?${params}`);
-      const data = await res.json();
-      console.table(`THIS IS THE DATA WE GOT BACK FIRST!!!${data}`);
+      const response = await fetch(url);
+      const data = await response.json();
 
-      if (!data.response?.results?.length) {
-        return `No articles found for query: "${query}"`;
-      }
+      const articles = data.response.results.map(article => ({
+        title:   article.webTitle,
+        url:     article.webUrl,
+        section: article.sectionName,
+        date:    article.webPublicationDate,
+        summary: article.fields?.trailText || "No summary available.",
+      }));
 
-      return data.response.results
-        .map(a =>
-          `TITLE: ${a.webTitle}\n` +
-          `URL: ${a.webUrl}\n` +
-          `DATE: ${a.webPublicationDate.split("T")[0]}\n` +
-          `SUMMARY: ${a.fields?.trailText || "No summary available."}`
-        )
-        .join("\n\n---\n\n");
-
-    } catch (err) {
-      return `Guardian API error: ${err.message}`;
+      return JSON.stringify(articles, null, 2);
+    } catch (error) {
+      return `Failed to fetch articles: ${error.message}`;
     }
   },
   {
-    name: "fetch_tech_news",
-    description:
-      "Fetches recent technology articles from The Guardian newspaper. " +
-      "Call this FIRST before writing any digest or posting to Discord. " +
-      "Returns article titles, URLs, dates, and summaries. " +
-      "Input: a search query (e.g. 'artificial intelligence', 'javascript', 'startups') " +
-      "and how many articles to return.",
+    name: "fetchTechNews",
+    description: "Fetches the latest technology articles from The Guardian API. Returns an array of articles with title, url, section, date, and summary.",
     schema: z.object({
-      query: z.string().describe(
-        "Search term to filter articles. Examples: 'AI', 'javascript', 'startups', 'cybersecurity'. " +
-        "Leave empty string for general tech news."
-      ),
-      limit: z.number().describe(
-        "Number of articles to return. Must be between 5 and 20."
-      ),
+      pageSize: z.number().optional().describe("Number of articles to fetch. Defaults to 10."),
     }),
   }
 );
